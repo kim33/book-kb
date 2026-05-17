@@ -1,0 +1,5 @@
+# Ignore the new virtual environment name
+book-env/
+__pycache__/
+*.pyc
+.env
