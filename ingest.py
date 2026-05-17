@@ -4,6 +4,8 @@ import time
 from anthropic import Anthropic
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Activate environment variables from .env file
 load_dotenv()
@@ -15,6 +17,16 @@ NEO4J_PW = os.environ.get("NEO4J_PW")
 
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 db_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PW))
+
+
+# Thread-safe tracker to prevent threads from grabbing the same in-flight nodes
+in_flight_lock = threading.Lock()
+in_flight_nodes = set() 
+
+# Global atomic tracker for progress reporting
+completed_counter_lock = threading.Lock()
+total_expanded_this_session = 0
+
 
 # =====================================================================
 # GPTKB-INSPIRED OPEN ELICITATION SYSTEM PROMPT
@@ -53,8 +65,7 @@ Extraction Rules:
 2. Generate between 5 to 8 highly descriptive, accurate edge connections. Both node types and relationship labels are fully open-ended.
 3. CRITICAL CONTEXT FILTER: Your goal is to build a LITERARY graph. 
    - If the requested entity is a Book or Author, extract its core attributes (characters, settings, influences, awards).
-   - If the requested entity is NOT a book (e.g., a Location like 'Edinburgh', or a Concept like 'Magical Realism'), you MUST ONLY extract relationships that tie it back to literature, authors, or books (e.g., BIRTHPLACE_OF_AUTHOR, SETTING_OF_BOOK, INSPIRED_MOVEMENT). 
-   - Do NOT extract general trivia unrelated to books (e.g., do NOT output 'Edinburgh' -> CAPITAL_OF -> 'Scotland'). Every single edge must have a thematic anchor to the literary world.
+   - LITERARY CONTEXT FILTER: Every single extracted edge must have a thematic anchor back to the literary world. Do not emit generic trivia.
 4. To ensure the graph converges cleanly, you must normalize semantically identical relationship types. Prioritize common native graph standards over slight linguistic variations
 """
 
@@ -113,6 +124,7 @@ def upsert_graph_data(extracted_json):
             edge_cypher = f"""
             MATCH (s:{source_label} {{name: $source_name}})
             MERGE (t:{target_label} {{name: $target_name}})
+            ON CREATE SET t.crawled = false
             MERGE (s) - [r:{dynamic_rel}] -> (t)
             """
             try:
@@ -157,77 +169,91 @@ def query_claude_for_node(entity_name, entity_type):
     except Exception as e:
         print(f"❌ API Failure for '{entity_name}': {e}")
         return None
-
 # =====================================================================
-# CONTINUOUS DEEP-CRAWL ENGINE (GPTKB STRATEGY)
+# BACKGROUND WORKER TARGET LOGIC
 # =====================================================================
-def run_gptkb_style_crawler(target_total_nodes=50):
-    """
-    Recursively crawls outward through newly discovered uncrawled leaves,
-    building a massive unbounded literary graph network.
-    """
-    print(f"🏗️ Starting GPTKB Open-Extraction Engine. Target: {target_total_nodes} nodes.")
-    total_expanded_this_session = 0
-    
-    while total_expanded_this_session < target_total_nodes:
-        # Dynamically scan the perimeter for ANY node lacking the crawled flag
-        find_uncrawled_cypher = """
-        MATCH (n)
-        WHERE (n.crawled IS NULL OR n.crawled = false)
-          AND (
-            n:Book 
-            OR n:Author 
-            OR EXISTS { (n)-[]-(:Book) } 
-            OR EXISTS { (n)-[]-(:Author) }
-          )
-        RETURN n.name AS name, labels(n)[0] AS type
-        LIMIT 10
-        """
-        
-        with db_driver.session() as session:
-            result = session.run(find_uncrawled_cypher)
-            mini_batch = [{"name": record["name"], "type": record["type"]} for record in result]
-            
-        # Seed fallback if the database canvas is entirely empty
-        if not mini_batch:
-            if total_expanded_this_session == 0:
-                print("🌱 Database is completely empty. Seeding with 'Harry Potter' to trigger materialization...")
-                mini_batch = [{"name": "Harry Potter and the Sorcerer's Stone", "type": "Book"}]
-            else:
-                print("🏁 No more leaf entities remain to trace. Extraction complete!")
-                break
+def crawl_worker(target_node, target_total_nodes):
+    global total_expanded_this_session
+    name = target_node["name"]
+    label_type = target_node["type"]
 
-        print(f"\n📦 Pulled a fresh sub-batch of {len(mini_batch)} uncrawled leaves out of the graph...")
+    with completed_counter_lock:
+        if total_expanded_this_session >= target_total_nodes:
+            with in_flight_lock:
+                in_flight_nodes.discard(name)
+            return
+        current_idx = total_expanded_this_session + 1
+        print(f"⚙️ [{current_idx}/{target_total_nodes}] Eliciting facts for {label_type}: '{name}'...")
 
-        for current_target in mini_batch:
-            if total_expanded_this_session >= target_total_nodes:
-                break
-                
-            print(f"⚙️ [{total_expanded_this_session + 1}/{target_total_nodes}] Eliciting facts for {current_target['type']}: '{current_target['name']}'...")
+    # Fetch facts over HTTP connection outside of active database sessions
+    payload = query_claude_for_node(name, label_type)
+
+    with db_driver.session() as session:
+        if payload:
+            upsert_graph_data(payload)
+            mark_crawled_cypher = "MATCH (n {name: $name}) SET n.crawled = true"
+            session.run(mark_crawled_cypher, name=name)
             
-            payload = query_claude_for_node(current_target['name'], current_target['type'])
-            
-            if payload:
-                upsert_graph_data(payload)
-                
-                # Turn the uncrawled leaf into a fully materialized branch
-                with db_driver.session() as session:
-                    mark_crawled_cypher = f"MATCH (n:{current_target['type']} {{name: $name}}) SET n.crawled = true"
-                    session.run(mark_crawled_cypher, name=current_target['name'])
-                    
+            with completed_counter_lock:
                 total_expanded_this_session += 1
-                time.sleep(0.1) # Courteous pacing
-            else:
-                # Avoid loop-clogging on failed lookups
-                with db_driver.session() as session:
-                    mark_failed_cypher = f"MATCH (n:{current_target['type']} {{name: $name}}) SET n.crawled = true, n.failed = true"
-                    session.run(mark_failed_cypher, name=current_target['name'])
+        else:
+            mark_failed_cypher = "MATCH (n {name: $name}) SET n.crawled = true, n.failed = true"
+            session.run(mark_failed_cypher, name=name)
 
-    print(f"\n🎉 Extraction cycle complete! Successfully materialized {total_expanded_this_session} nodes.")
+    # Free memory reference from tracking pool once worker complete
+    with in_flight_lock:
+        in_flight_nodes.discard(name)
 
+# =====================================================================
+# MULTI-THREADED COORDINATOR ENGINE
+# =====================================================================
+def run_parallel_crawler(target_total_nodes=300, max_workers=5):
+    global total_expanded_this_session
+    print(f"🏗️ Parallel GPTKB Engine Active. Target: {target_total_nodes} nodes | Concurrency Limit: {max_workers}")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        while total_expanded_this_session < target_total_nodes:
+
+            # Scan the frontier for unvisited nodes connected to literary anchors
+            find_uncrawled_cypher = """
+            MATCH (n)
+            WHERE (n.crawled IS NULL OR n.crawled = false)
+              AND (n:Book OR n:Author OR EXISTS { (n)-[]-(:Book) } OR EXISTS { (n)-[]-(:Author) })
+            RETURN n.name AS name, labels(n)[0] AS type
+            LIMIT 50
+            """
+            
+            with db_driver.session() as session:
+                result = session.run(find_uncrawled_cypher)
+                raw_batch = [{"name": record["name"], "type": record["type"] or "Concept"} for record in result]
+
+            # Warm cold-start handling rules
+            if not raw_batch and total_expanded_this_session == 0:
+                print("🌱 Graph canvas is completely empty. Seeding with initial node...")
+                raw_batch = [{"name": "Harry Potter and the Sorcerer's Stone", "type": "Book"}]
+            elif not raw_batch and len(in_flight_nodes) == 0:
+                print("🏁 Literary boundary tracing limits finalized. Execution complete!")
+                break
+
+            # The Synchronized Sieve: filter out tasks already claimed by other worker threads
+            tasks_to_submit = []
+            with in_flight_lock:
+                for node in raw_batch:
+                    if node["name"] not in in_flight_nodes:
+                        in_flight_nodes.add(node["name"])
+                        tasks_to_submit.append(node)
+
+            # Fire execution allocations asynchronously to background threads
+            for target_node in tasks_to_submit:
+                executor.submit(crawl_worker, target_node, target_total_nodes)
+
+            # Cooldown sleep step to avoid spinning the CPU main loop while threads process I/O
+            time.sleep(1.0)
+
+    print(f"\n🎉 Parallel pipeline complete. Materialized {total_expanded_this_session} nodes total.")
 if __name__ == "__main__":
     try:
         # Increase this target boundary as large as your API budget allows!
-        run_gptkb_style_crawler(target_total_nodes=300)
+        run_parallel_crawler(target_total_nodes=300, max_workers=3)
     finally:
         db_driver.close()
