@@ -3,7 +3,7 @@
 An end-to-end, domain-specific knowledge elicitation pipeline modeled after the GPTKB framework. This system transforms unstructured literary knowledge into a highly dense, semantic graph database to power explainable path-based recommendations.
 
 <p align="center">
-  <img src="bookshelf_graph.jpg" alt="Bookshelf Knowledge Graph Visual Mapping" width="100%">
+  <img src="bookshelf_graph.png" alt="Bookshelf Knowledge Graph Visual Mapping" width="100%">
 </p>
 
 ## 🚀 Overview
