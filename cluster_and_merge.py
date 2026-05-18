@@ -20,8 +20,8 @@ def consolidate_graph_relations(similarity_threshold=0.75):
     
     # Step 1: Pull every unique relationship property type Claude has created
     fetch_query = """
-    MATCH ()-[r:LINKED_TO]->()
-    RETURN DISTINCT r.relationship_type AS rel_type
+    MATCH ()-[r]->()
+    RETURN DISTINCT type(r) AS rel_type
     """
     with db_driver.session() as session:
         result = session.run(fetch_query)
@@ -62,9 +62,10 @@ def consolidate_graph_relations(similarity_threshold=0.75):
                 
                 # Cypher query to rewrite property tags safely inside your database
                 merge_query = """
-                MATCH ()-[r:LINKED_TO]->()
-                WHERE r.relationship_type IN $variants
-                SET r.relationship_type = $canonical
+                MATCH (a)-[r]->(b)
+                WHERE type(r) IN $variants
+                CALL apoc.create.relationship(a, $canonical, properties(r), b) YIELD rel
+                DELETE r
                 """
                 session.run(merge_query, variants=rel_variants, canonical=canonical_label)
                 
