@@ -1,0 +1,5 @@
+anthropic
+python-dotenv
+neo4j
+sentence-transformers
+scikit-learn

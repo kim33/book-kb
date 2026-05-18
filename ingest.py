@@ -29,10 +29,10 @@ total_expanded_this_session = 0
 
 
 # =====================================================================
-# GPTKB-INSPIRED OPEN ELICITATION SYSTEM PROMPT
+# OPEN ELICITATION SYSTEM PROMPT
 # =====================================================================
 SYSTEM_PROMPT = """
-You are a specialized literary knowledge elicitation engine modeled after the GPTKB framework. Your single objective is to extract all discoverable factual assertions about a given entity from your internal knowledge base as an open-ended graph structure.
+You are a specialized literary knowledge elicitation engine. Your single objective is to extract all discoverable factual assertions about a given entity from your internal knowledge base as an open-ended graph structure.
 
 You MUST respond ONLY with a single, raw, valid JSON object.
 Strictly follow these formatting rules:
@@ -148,7 +148,6 @@ def query_claude_for_node(entity_name, entity_type):
         )
         cleaned_response = response.content[0].text.strip()
         
-        # --- ADD THIS SANITIZATION BLOCK ---
         # Strip markdown code block wrappers if Claude ignored the prompt instructions
         if cleaned_response.startswith("```"):
             # Remove opening markdown line (e.g., ```json or ```)
@@ -209,7 +208,7 @@ def crawl_worker(target_node, target_total_nodes):
 # =====================================================================
 def run_parallel_crawler(target_total_nodes=300, max_workers=5):
     global total_expanded_this_session
-    print(f"🏗️ Parallel GPTKB Engine Active. Target: {target_total_nodes} nodes | Concurrency Limit: {max_workers}")
+    print(f"🏗️ Parallel Engine Active. Target: {target_total_nodes} nodes | Concurrency Limit: {max_workers}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         while total_expanded_this_session < target_total_nodes:
@@ -229,7 +228,7 @@ def run_parallel_crawler(target_total_nodes=300, max_workers=5):
 
             # Warm cold-start handling rules
             if not raw_batch and total_expanded_this_session == 0:
-                print("🌱 Graph canvas is completely empty. Seeding with initial node...")
+                print("Graph canvas is completely empty. Seeding with initial node...")
                 raw_batch = [{"name": "Harry Potter and the Sorcerer's Stone", "type": "Book"}]
             elif not raw_batch and len(in_flight_nodes) == 0:
                 print("🏁 Literary boundary tracing limits finalized. Execution complete!")
@@ -250,10 +249,10 @@ def run_parallel_crawler(target_total_nodes=300, max_workers=5):
             # Cooldown sleep step to avoid spinning the CPU main loop while threads process I/O
             time.sleep(1.0)
 
-    print(f"\n🎉 Parallel pipeline complete. Materialized {total_expanded_this_session} nodes total.")
+    print(f"\n Parallel pipeline complete. Materialized {total_expanded_this_session} nodes total.")
 if __name__ == "__main__":
     try:
         # Increase this target boundary as large as your API budget allows!
-        run_parallel_crawler(target_total_nodes=300, max_workers=3)
+        run_parallel_crawler(target_total_nodes=500, max_workers=3)
     finally:
         db_driver.close()
